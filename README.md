@@ -29,63 +29,12 @@ The screens defines the event handler. In this case the handler is mapped to a s
 >Note : The `Linkage Activated` flag needs to be checked for the linkage to be activated.
 
 ### Event Handler Class
-Sample code for the `ON_EVENT` method can be found beneath. The input parameters of the method contain the business object type, the business object id and event type (create, changed, deleted, ...).
-I used the business object id to lookup some additional information on the business partner and put this into the message.
-Error handling was done in a similar way to the SAP BPT Enterprise messaging via the SAP Application log. I even re-used the same method `cl_beh_application_log=>create` for this.
->Note : if you'd like to have the message body to adhere to the [Cloud Events](https://cloudevents.io/) standard as used by SAP BPT Enterprise messaging then you might also be able to re-use some code.
->Note : You'll probably need to rename the constants in the ABAP code below to the constants in your application.
-    gc_interface_id = interface id of the ABAP SDK
-    gc_message_class = message class for error message
-    gc_appl_log_obj = SAP Application Log Object
-    gc_appl_log_subobj = SAP Application Log Sub Object
+Sample code for the `ON_EVENT` method can be found at [BI_EVENT_HANDLER_STATIC~ON_EVENT](code\BI_EVENT_HANDLER_STATIC_ON_EVENT). The input parameters of the method contain the business object type, the business object id and event type (create, changed, deleted, ...).
+I used the business object id to lookup some additional information on the business partner.
 
 ```
-  method BI_EVENT_HANDLER_STATIC~ON_EVENT.
-
-    "InterfaceId to be used by ABAP SDK
-    constants: gc_interface_id type zinterface_id value 'AZEHUBBDL',
-               gc_message_class type symsgid value 'ZAZEH',
-               gc_appl_log_obj type balobj_d value 'ZBD_AZEH',
-               gc_appl_log_subobj type balsubobj value 'ZBUPA'.
-
-    TYPES: BEGIN OF lty_message,
-         busobj     TYPE sbo_bo_type,
-         busobjname TYPE SBEH_BOTYP_TEXT,
-         event      TYPE SIBFEVENT,
-         date       type dats,
-         time       type tims,
-         objkey     TYPE SIBFBORIID,
-         firstname  TYPE bu_namep_f,
-         lastname   type bu_namep_l,
-       END OF lty_message.
-
-    data: lv_busobj_type        type sbo_bo_type,
-          lv_busobj_type_name   type SBEH_BOTYP_TEXT,
-          lv_buspartner_id      type BU_PARTNER,
-          lv_centraldata_person type BAPIBUS1006_CENTRAL_PERSON,
-          lv_firstname          type bu_namep_f,
-          lv_lastname           type bu_namep_l.
-
-    data: it_headers            TYPE tihttpnvp,
-          wa_headers            TYPE LINE OF tihttpnvp,
-          lv_error_string       TYPE string,
-          lv_response           TYPE string,
-          cx_interface          TYPE REF TO zcx_interace_config_missing,
-          cx_http               TYPE REF TO zcx_http_client_failed,
-          cx_adf_service        TYPE REF TO zcx_adf_service,
-          oref_eventhub         TYPE REF TO zcl_adf_service_eventhub,
-          oref                  TYPE REF TO zcl_adf_service,
-          filter                type zbusinessid,
-          lv_http_status        TYPE i, "HTTP Status code
-          lo_json               TYPE REF TO cl_trex_json_serializer,
-          lv_json_string        TYPE string,
-          lv_json_xstring       TYPE xstring,
-          lv_message            TYPE lty_message.
-
-    data: lt_msg                TYPE bal_tt_msg,
-          ls_msg                TYPE bal_s_msg.
-
-    "select the business object type
+...
+"select the business object type
     SELECT SINGLE bo_type INTO lv_busobj_type
       FROM sbo_i_bodef
       WHERE object_name = sender-typeid
@@ -105,32 +54,13 @@ Error handling was done in a similar way to the SAP BPT Enterprise messaging via
          businesspartner = lv_buspartner_id
       importing
          centraldataperson = lv_centraldata_person.
+...
+```
+The following step is to create the message and convert it to json.
+```
+...
 
-    "Create the message
-    lv_message-busobj     = sender-typeid.
-    lv_message-busobjname = lv_busobj_type_name.
-    lv_message-event      = event.
-    lv_message-objkey     = lv_buspartner_id.
-    lv_message-date       = sy-datlo.
-    lv_message-time       = sy-timlo.
-    lv_message-firstname  = lv_centraldata_person-firstname.
-    lv_message-lastname   = lv_centraldata_person-lastname.
-
-    TRY.
-      "Calling Factory method to instantiate eventhub client
-
-      oref = zcl_adf_service_factory=>create( iv_interface_id        = gc_interface_id
-                                              iv_business_identifier = filter ).
-      oref_eventhub ?= oref. "Type Cast to EventHub Object?
-
-      "Setting Expiry time
-      CALL METHOD oref_eventhub->add_expiry_time
-        EXPORTING
-          iv_expiry_hour = 0
-          iv_expiry_min  = 15
-          iv_expiry_sec  = 0.
-
-      "Convert to JSON
+"Convert to JSON
       CREATE OBJECT lo_json
         EXPORTING
           data = lv_message.
@@ -151,7 +81,14 @@ Error handling was done in a similar way to the SAP BPT Enterprise messaging via
       IF sy-subrc <> 0.
       ENDIF.
 
-      " Sending Converted SAP data to Azure Eventhub
+...
+```
+
+In the next step the message is sent to the Azure Event Hub.
+```
+...
+
+" Sending Converted SAP data to Azure Eventhub
       CALL METHOD oref_eventhub->send
         EXPORTING
           request        = lv_json_xstring  "Input XSTRING of SAP Business Event data
@@ -159,62 +96,22 @@ Error handling was done in a similar way to the SAP BPT Enterprise messaging via
         IMPORTING
           response       = lv_response       "Response from EventHub
           ev_http_status = lv_http_status.   "Status
-
-    CATCH zcx_interace_config_missing INTO cx_interface.
-      lv_error_string = cx_interface->get_text( ).
-      ls_msg-msgty  = 'E'.
-      ls_msg-msgid  = gc_message_class.
-      ls_msg-msgno  = '001'.
-      ls_msg-msgv1  = sender-typeid.
-      ls_msg-msgv2  = lv_buspartner_id.
-      ls_msg-msgv3  = lv_error_string.
-      APPEND ls_msg TO lt_msg.
-      CALL METHOD cl_beh_application_log=>create
-         EXPORTING
-           i_msg       = lt_msg
-           i_object    = gc_appl_log_obj
-           i_subobject = gc_appl_log_subobj.
-
-    CATCH zcx_http_client_failed INTO cx_http .
-      lv_error_string = cx_http->get_text( ).
-      ls_msg-msgty  = 'E'.
-      ls_msg-msgid  = gc_message_class.
-      ls_msg-msgno  = '001'.
-      ls_msg-msgv1  = sender-typeid.
-      ls_msg-msgv2  = lv_buspartner_id.
-      ls_msg-msgv3  = lv_error_string.
-      APPEND ls_msg TO lt_msg.
-      CALL METHOD cl_beh_application_log=>create
-         EXPORTING
-           i_msg       = lt_msg
-           i_object    = gc_appl_log_obj
-           i_subobject = gc_appl_log_subobj.
-
-    CATCH zcx_adf_service INTO cx_adf_service.
-      lv_error_string = cx_adf_service->get_text( ).
-      lv_error_string = cx_interface->get_text( ).
-      ls_msg-msgty  = 'E'.
-      ls_msg-msgid  = gc_message_class.
-      ls_msg-msgno  = '001'.
-      ls_msg-msgv1  = sender-typeid.
-      ls_msg-msgv2  = lv_buspartner_id.
-      ls_msg-msgv3  = lv_error_string.
-      APPEND ls_msg TO lt_msg.
-      CALL METHOD cl_beh_application_log=>create
-         EXPORTING
-           i_msg       = lt_msg
-           i_object    = gc_appl_log_obj
-           i_subobject = gc_appl_log_subobj.
-
-    ENDTRY.
-
-  endmethod.
-
+...
 ```
 
+Error handling was done in a similar way to the SAP BPT Enterprise messaging via the SAP Application log. I even re-used the same method `cl_beh_application_log=>create` for this.
+
+>Note : if you'd like to have the message body to adhere to the [Cloud Events](https://cloudevents.io/) standard as used by SAP BPT Enterprise messaging then you might also be able to re-use some code.
+
+>Note : In the [sample code](code\BI_EVENT_HANDLER_STATIC_ON_EVENT) you will need to rename the constants in the ABAP code below to the constants in your application.
+    gc_interface_id = interface id of the ABAP SDK
+    gc_message_class = message class for error message
+    gc_appl_log_obj = SAP Application Log Object
+    gc_appl_log_subobj = SAP Application Log Sub Object
+
 ### Surrounding Objects
-The code above makes use of the following ABAP Objects :
-* Message Clas : for error messages : use Transaction `SE91`
+The sample code above makes use of the following ABAP Objects :
+* Message Class for error messages : use Transaction `SE91`
 
 <img src="images\messages.jpg">
 
@@ -233,4 +130,4 @@ Testing can be done by either :
 
 The resulting message can be seen in the ABAP SDK Monitoring transaction `ZREST_UTIL`
 
-<img src="images\zrestutilt2.jpg">
+<img src="images\zrestutiltest2.jpg">
